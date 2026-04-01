@@ -1,6 +1,6 @@
 # Minecraft Server Manager — Telegram Bot
 
-A Telegram bot running **aiogram 3.x** for managing a Minecraft Fabric 1.20.1 server on Linux.
+A Telegram bot running **aiogram 3.x** for managing a Minecraft Fabric server on Linux.
 
 ## Project Structure
 
