@@ -1,0 +1,78 @@
+# Реализация RCON-протокола на чистом asyncio — без сторонних библиотек.
+# mcrcon использует signal.SIGALRM, который нельзя вызывать из потока;
+# здесь всё async, никаких сигналов и executor'ов не нужно.
+import asyncio
+import logging
+import struct
+
+from config import RCON_HOST, RCON_PASSWORD, RCON_PORT
+
+logger = logging.getLogger(__name__)
+
+_MAX_RESPONSE_LEN = 3800
+_TYPE_AUTH = 3
+_TYPE_CMD = 2
+_REQ_ID = 1
+_CONNECT_TIMEOUT = 10.0
+_READ_TIMEOUT = 10.0
+
+
+def _pack(req_id: int, pkt_type: int, payload: str) -> bytes:
+    body = payload.encode("utf-8")
+    # length = RequestID(4) + Type(4) + payload + null + padding
+    length = 4 + 4 + len(body) + 2
+    return struct.pack("<iii", length, req_id, pkt_type) + body + b"\x00\x00"
+
+
+async def _read_packet(
+    reader: asyncio.StreamReader,
+) -> tuple[int, int, str]:
+    header = await asyncio.wait_for(reader.readexactly(4), timeout=_READ_TIMEOUT)
+    length = struct.unpack("<i", header)[0]
+    data = await asyncio.wait_for(reader.readexactly(length), timeout=_READ_TIMEOUT)
+    req_id, pkt_type = struct.unpack_from("<ii", data)
+    payload = data[8:].rstrip(b"\x00").decode("utf-8", errors="replace")
+    return req_id, pkt_type, payload
+
+
+async def send_rcon_command(command: str) -> str:
+    """Отправляет команду на сервер через RCON и возвращает ответ."""
+    try:
+        reader, writer = await asyncio.wait_for(
+            asyncio.open_connection(RCON_HOST, RCON_PORT),
+            timeout=_CONNECT_TIMEOUT,
+        )
+    except (ConnectionRefusedError, OSError) as exc:
+        return f"❌ Не могу подключиться к RCON ({RCON_HOST}:{RCON_PORT}): {exc}"
+    except asyncio.TimeoutError:
+        return "❌ Таймаут подключения к RCON."
+
+    try:
+        # Авторизация
+        writer.write(_pack(_REQ_ID, _TYPE_AUTH, RCON_PASSWORD))
+        await writer.drain()
+        req_id, _, _ = await _read_packet(reader)
+        if req_id == -1:
+            return "❌ Неверный RCON-пароль."
+
+        # Команда
+        writer.write(_pack(_REQ_ID, _TYPE_CMD, command))
+        await writer.drain()
+        _, _, response = await _read_packet(reader)
+
+        text = response.strip() or "(нет ответа)"
+        if len(text) > _MAX_RESPONSE_LEN:
+            text = text[:_MAX_RESPONSE_LEN] + "\n…(обрезано)"
+        return text
+
+    except asyncio.TimeoutError:
+        return "❌ Таймаут ожидания ответа RCON."
+    except Exception as exc:  # noqa: BLE001
+        logger.exception("RCON ошибка")
+        return f"❌ Ошибка RCON: {exc}"
+    finally:
+        writer.close()
+        try:
+            await writer.wait_closed()
+        except Exception:  # noqa: BLE001
+            pass
